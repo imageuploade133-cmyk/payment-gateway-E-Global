@@ -7,13 +7,31 @@ import logger from "../config/logger";
 
 const router = Router();
 
+// Router-wide gateway auth & session validation middleware
+router.use(gatewayAuthMiddleware);
+
 /**
  * Endpoint to generate and send a WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/send-otp", async (req: Request, res: Response) => {
   try {
-    const { phoneNumber, type } = req.body;
+    const { phoneNumber, type, channel, email } = req.body;
+
+    if (channel === "email") {
+      if (!email) {
+        res.status(400).json({ success: false, message: "email parameter is required." });
+        return;
+      }
+      const result = await EmailOtpService.sendSignupOtp(email);
+      res.status(200).json({
+        success: true,
+        channel: "email",
+        message: result.message,
+        ...(result.devOtp ? { devOtpCode: result.devOtp } : {}),
+      });
+      return;
+    }
 
     if (!phoneNumber) {
       res.status(400).json({ success: false, message: "phoneNumber parameter is required." });
@@ -37,16 +55,26 @@ router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Respon
  * Endpoint to verify a received WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/verify-otp", async (req: Request, res: Response) => {
   try {
-    const { phoneNumber, otp, type } = req.body;
+    const { phoneNumber, otp, otpCode, type, channel, email } = req.body;
 
-    if (!phoneNumber || !otp) {
+    if (channel === "email") {
+      if (!email || !(otpCode || otp)) {
+        res.status(400).json({ success: false, message: "email and otpCode are required parameters." });
+        return;
+      }
+      const result = await EmailOtpService.verifySignupOtp(email, otpCode || otp);
+      res.status(200).json({ success: true, channel: "email", message: result.message });
+      return;
+    }
+
+    if (!phoneNumber || !(otpCode || otp)) {
       res.status(400).json({ success: false, message: "phoneNumber and otp are required parameters." });
       return;
     }
 
-    const result = await WhatsAppOtpService.verifyOtp(phoneNumber, otp, type || "signup");
+    const result = await WhatsAppOtpService.verifyOtp(phoneNumber, otpCode || otp, type || "signup");
     res.status(200).json({
       success: true,
       message: result.message,
@@ -61,7 +89,7 @@ router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Resp
  * Endpoint to trigger a PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves phone/email, and dispatches OTP
  */
-router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-reset-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { channel } = req.body;
@@ -118,7 +146,7 @@ router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Respo
  * Endpoint to verify PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves session, and verifies OTP
  */
-router.post("/pin-verify-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-verify-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { otpCode, channel } = req.body;

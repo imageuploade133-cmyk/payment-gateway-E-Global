@@ -1,5 +1,5 @@
 import { mapProviderStatus } from "../utils/statusMapper";
-import { parseUserIdFromTxRef, resolveFundingLedgerDocId, isValidFlwId } from "../utils/userIdParser";
+import { parseUserIdFromTxRef, resolveFundingLedgerDocId } from "../utils/userIdParser";
 import { WalletFundingService } from "../services/walletFundingService";
 import { env } from "../config/env";
 import { Request, Response, NextFunction } from "express";
@@ -488,6 +488,17 @@ export const initiateTransfer = async (req: AuthenticatedRequest, res: Response,
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId} | body:`, req.body);
 
+  const authenticatedUserId = req.user?.uid;
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim() || req.user?.firebaseAuth !== true) {
+    logger.warn(`[Flutterwave Controller] Transfer rejected: unauthenticated request or non-Firebase token | reqId=${reqId}`);
+    res.status(401).json({
+      success: false,
+      message: "Authentication Error: Verified user authentication is required to execute transfers.",
+    });
+    return;
+  }
+  const userId = authenticatedUserId.trim();
+
   try {
     const body = {
       amount: typeof req.body.amount === "string" ? Number(req.body.amount) : req.body.amount,
@@ -525,7 +536,6 @@ Received: ${issue.received || "undefined"}`);
     }
 
     const payload = validationResult.data;
-    const keyPrefix = env.FLW_SECRET_KEY ? env.FLW_SECRET_KEY.slice(0, 12) : "MISSING";
     logger.info(`[Flutterwave Controller] Sending to Flutterwave (Transfer Payload). Payload:`, payload);
 
     const result = await transferService.executeTransfer({
@@ -537,7 +547,7 @@ Received: ${issue.received || "undefined"}`);
       narration: payload.narration,
       reference: payload.reference,
       requestId: reqId,
-      userId: req.user?.uid || req.body.userId || req.body.uid || "SYSTEM",
+      userId,
 
       fee: typeof req.body.fee === "number"
         ? req.body.fee
@@ -1246,7 +1256,11 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
           source: "webhook",
         });
 
-        if (!creditResult.success && !creditResult.alreadyCredited && !creditResult.unmatched) {
+        if (!adminDb || creditResult.success || creditResult.alreadyCredited || creditResult.unmatched) {
+          if (transactionId) {
+            await idempotency.saveWebhookProcessed(transactionId);
+          }
+        } else {
           // Release processing lease on temporary credit error so webhook can be retried by provider
           await idempotency.releaseWebhookProcessing(transactionId);
         }
@@ -1268,12 +1282,12 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               reason: payload.data?.processor_response || payload.data?.narration || "Payment declined or canceled",
               updatedAt: new Date().toISOString(),
             }, { merge: true });
-            if (flwId) {
-              await idempotency.saveWebhookProcessed(flwId);
-            }
           } catch (uErr: any) {
             logger.warn(`[Webhook charge.completed] Failed to update pending funding doc: ${uErr.message}`);
           }
+        }
+        if (flwId) {
+          await idempotency.saveWebhookProcessed(flwId);
         }
       }
 
@@ -1286,9 +1300,19 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
   }
 };
 
-export const initiateBulkTransfer = async (req: Request, res: Response, next: NextFunction) => {
+export const initiateBulkTransfer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateBulkTransfer request | reqId=${reqId}`);
+
+  const authenticatedUserId = req.user?.uid;
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim() || req.user?.firebaseAuth !== true) {
+    logger.warn(`[Flutterwave Controller] Bulk transfer rejected: unauthenticated request or non-Firebase token | reqId=${reqId}`);
+    res.status(401).json({
+      success: false,
+      message: "Authentication Error: Verified user authentication is required to execute transfers.",
+    });
+    return;
+  }
 
   try {
     const { title, bulk_data } = req.body;
@@ -1326,6 +1350,66 @@ export const initiateBulkTransfer = async (req: Request, res: Response, next: Ne
   }
 };
 
+function isBlockedProxyEndpoint(rawEndpoint: string): boolean {
+  if (!rawEndpoint || typeof rawEndpoint !== "string") return true;
+
+  let normalized = rawEndpoint;
+
+  // 1. Unescape / URL decode repeatedly (up to 5 passes to resolve multi-layer URL encoding)
+  for (let i = 0; i < 5; i++) {
+    try {
+      const decoded = decodeURIComponent(normalized);
+      if (decoded === normalized) break;
+      normalized = decoded;
+    } catch {
+      break;
+    }
+  }
+
+  // 2. Normalize backslashes to forward slashes
+  normalized = normalized.replace(/\\/g, "/");
+
+  // 3. Collapse multiple leading slashes into a single slash so //transfers becomes /transfers
+  normalized = normalized.replace(/^\/+/, "/");
+
+  // 4. Extract path from absolute URL if full URL with scheme is provided (e.g., https://api.flutterwave.com/v3/transfers)
+  if (normalized.includes("://")) {
+    try {
+      const parsedUrl = new URL(normalized);
+      normalized = parsedUrl.pathname;
+    } catch {
+      const schemeEnd = normalized.indexOf("://");
+      const pathStart = normalized.indexOf("/", schemeEnd + 3);
+      normalized = pathStart !== -1 ? normalized.substring(pathStart) : "/";
+    }
+  }
+
+  // 5. Strip query parameters and hash fragments
+  normalized = normalized.split("?")[0].split("#")[0];
+
+  // 6. Ensure leading slash and remove trailing slashes
+  if (!normalized.startsWith("/")) {
+    normalized = "/" + normalized;
+  }
+  normalized = normalized.replace(/\/+$/, "");
+
+  const lowerPath = normalized.toLowerCase();
+
+  // 7. Check against blocked payout & transfer endpoint patterns
+  const blockedPatterns = [
+    "/transfer",
+    "/transfers",
+    "/bulk-transfer",
+    "/bulk-transfers",
+    "/payout",
+    "/payouts",
+  ];
+
+  return blockedPatterns.some((pattern) => {
+    return lowerPath === pattern || lowerPath.includes(pattern + "/") || lowerPath.endsWith(pattern);
+  });
+}
+
 export const proxy = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received proxy request | reqId=${reqId}`);
@@ -1336,6 +1420,15 @@ export const proxy = async (req: Request, res: Response, next: NextFunction) => 
       res.status(400).json({
         success: false,
         message: "endpoint is required.",
+      });
+      return;
+    }
+
+    if (isBlockedProxyEndpoint(String(endpoint))) {
+      logger.warn(`[Flutterwave Controller] Blocked unauthorized payout dispatch attempt through proxy | endpoint=${endpoint} | reqId=${reqId}`);
+      res.status(403).json({
+        success: false,
+        message: "Forbidden: Direct payout and transfer operations are prohibited through the proxy endpoint. Use dedicated authenticated transfer routes.",
       });
       return;
     }
