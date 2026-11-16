@@ -7,43 +7,14 @@ import logger from "../config/logger";
 
 const router = Router();
 
+// Router-wide gateway auth & session validation middleware
+router.use(gatewayAuthMiddleware);
+
 /**
  * Endpoint to generate and send a WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-
-/**
- * Delivers an application-generated 2FA/new-device OTP through backend VM env.
- * This endpoint does not read CPANEL provider settings.
- */
-router.post("/dispatch-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
-  try {
-    const { channel, destination, otp, purpose } = req.body || {};
-    if (!["email", "whatsapp"].includes(channel) || !destination || !otp || !purpose) {
-      res.status(400).json({ success: false, message: "channel, destination, otp and purpose are required." });
-      return;
-    }
-    if (!/^[0-9]{6}$/.test(String(otp))) {
-      res.status(400).json({ success: false, message: "A valid 6-digit OTP is required." });
-      return;
-    }
-    if (!["login_2fa", "new_device_login"].includes(purpose)) {
-      res.status(400).json({ success: false, message: "Unsupported OTP purpose." });
-      return;
-    }
-    if (channel === "email") {
-      await EmailOtpService.sendRawOtp(String(destination), String(otp), purpose);
-    } else {
-      await WhatsAppOtpService.sendRawOtp(String(destination), String(otp), purpose);
-    }
-    res.status(200).json({ success: true, channel, message: `Verification code delivered via ${channel}.` });
-  } catch (error: any) {
-    logger.error(`[AuthRoutes] dispatch-otp failure: ${error.message}`);
-    res.status(502).json({ success: false, message: error.message || "OTP delivery failed." });
-  }
-});
-
-router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/send-otp", async (req: Request, res: Response) => {
   try {
     const { phoneNumber, type, channel, email } = req.body;
 
@@ -84,7 +55,7 @@ router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Respon
  * Endpoint to verify a received WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/verify-otp", async (req: Request, res: Response) => {
   try {
     const { phoneNumber, otp, otpCode, type, channel, email } = req.body;
 
@@ -118,7 +89,7 @@ router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Resp
  * Endpoint to trigger a PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves phone/email, and dispatches OTP
  */
-router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-reset-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { channel } = req.body;
@@ -175,7 +146,7 @@ router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Respo
  * Endpoint to verify PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves session, and verifies OTP
  */
-router.post("/pin-verify-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-verify-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { otpCode, channel } = req.body;

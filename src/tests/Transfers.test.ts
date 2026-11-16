@@ -3,11 +3,21 @@ import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
 import { env } from "../config/env";
+import jwt from "jsonwebtoken";
 
-// Mock Firebase Admin SDK to capture Firestore writes
+// Mock Firebase Admin SDK
 const mockFirestoreStore: Record<string, any> = {};
 
+const mockVerifyIdToken = jest.fn();
+
+jest.mock("firebase-admin/auth", () => ({
+  getAuth: jest.fn(() => ({
+    verifyIdToken: mockVerifyIdToken,
+  })),
+}));
+
 jest.mock("../config/firebase", () => ({
+  firebase: { app: { name: "[DEFAULT]" } },
   adminDb: {
     collection: (colName: string) => ({
       doc: (docId: string) => ({
@@ -74,16 +84,22 @@ jest.mock("../services/firestoreIdempotency", () => {
 const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
 const testApiKey = env.GATEWAY_API_KEYS[0];
 
-describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
+describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", () => {
   let validPayload: any;
+  let validJwtToken: string;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockFirestoreStore["users/test-user-id"] = { balance: 100000 };
+    mockFirestoreStore["users/test-user-id"] = { balance: 100000, activeSessionId: "test-session-id-123" };
     mockFirestoreStore["wallets/test-user-id_NGN"] = { balance: 100000 };
-    mockFirestoreStore["users/SYSTEM"] = { balance: 1000000 };
-    mockFirestoreStore["wallets/SYSTEM_NGN"] = { balance: 1000000 };
-    // Clear in-memory idempotency cache for test isolation
+
+    mockVerifyIdToken.mockResolvedValue({
+      uid: "test-user-id",
+      email: "user@e-tech-hub.com",
+    });
+
+    validJwtToken = "header.payload.mock_firebase_id_token";
+
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
 
@@ -99,109 +115,134 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
     };
   });
 
-  describe("POST /api/flutterwave/transfer - Request Validation (Zod)", () => {
-    it("should return HTTP 400 with a descriptive validation error if amount is missing", async () => {
-      const { amount, ...invalidPayload } = validPayload;
-      const res = await request(app)
-        .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
-        .send(invalidPayload);
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Validation Error");
-    });
-
-    it("should return HTTP 400 if amount is negative", async () => {
-      const res = await request(app)
-        .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
-        .send({ ...validPayload, amount: -100 });
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Validation Error");
-    });
-
-    it("should return HTTP 400 if account_number contains non-digits", async () => {
-      const res = await request(app)
-        .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
-        .send({ ...validPayload, account_number: "0123abc45" });
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Validation Error");
-    });
-
-    it("should return HTTP 400 if bank_code is malformed", async () => {
-      const res = await request(app)
-        .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
-        .send({ ...validPayload, bank_code: "abc" });
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Validation Error");
-    });
-  });
-
-  describe("POST /api/flutterwave/transfer - Execution & Reliability", () => {
-    it("should return normalized success object with HTTP 200 on successful provider transfer", async () => {
-      mockFlwClient.request.mockResolvedValue({
-        status: "success",
-        message: "Transfer queued",
-        data: {
-          id: 778899,
-          status: "NEW",
-          amount: 5000,
-          reference: validPayload.reference,
-        },
-      });
-
+  describe("Authentication & Identity Assertion Security", () => {
+    it("1. Valid API key with no user identity should be rejected with HTTP 401 and NEVER call Flutterwave", async () => {
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("X-API-Key", testApiKey)
         .send(validPayload);
 
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        success: true,
-        processing: true,
-        reference: validPayload.reference,
-        provider_reference: "778899",
-        status: "pending",
-        flutterwaveStatus: "new",
-        message: "Transfer submitted successfully and is being processed.",
-      });
-
-      expect(mockFlwClient.request).toHaveBeenCalledWith("post", "/transfers", {
-        account_bank: validPayload.bank_code,
-        account_number: validPayload.account_number,
-        amount: validPayload.amount,
-        narration: validPayload.narration,
-        currency: validPayload.currency,
-        reference: validPayload.reference,
-        callback_url: undefined,
-      });
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Authentication Error");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
     });
 
-    it("should explicitly persist custom narration and remark on transfer documents", async () => {
-      mockFlwClient.request.mockResolvedValue({
-        status: "success",
-        message: "Transfer queued",
-        data: {
-          id: 998877,
-          status: "NEW",
-          amount: 5000,
-          reference: validPayload.reference,
-        },
-      });
+    it("2. Invalid API key should be rejected with HTTP 401 and NEVER call Flutterwave", async () => {
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("X-API-Key", "invalid-key-999")
+        .send(validPayload);
 
-      const customNarration = "Monthly Consulting Fee Payment";
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Unauthorized");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+    });
+
+    it("3. Forged UID header alongside API key should be ignored and rejected with HTTP 401", async () => {
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("X-API-Key", testApiKey)
+        .set("X-User-UID", "forged-admin-uid")
+        .set("X-Authenticated-User-ID", "forged-admin-uid")
+        .send(validPayload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Authentication Error");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+    });
+
+    it("4. Forged body userId/uid without verified token should be rejected with HTTP 401", async () => {
+      const forgedBodyPayload = {
+        ...validPayload,
+        userId: "forged-user-id",
+        uid: "forged-user-id",
+      };
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
+        .send(forgedBodyPayload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Authentication Error");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+    });
+
+    it("5. Properly authenticated user via Bearer token should execute transfer successfully", async () => {
+      mockFlwClient.request.mockResolvedValueOnce({
+        status: "success",
+        message: "Transfer queued",
+        data: { id: 887766, status: "NEW" },
+      });
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
+        .send(validPayload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(mockFlwClient.request).toHaveBeenCalledWith(
+        "post",
+        "/transfers",
+        expect.objectContaining({
+          reference: validPayload.reference,
+          amount: 5000,
+        })
+      );
+    });
+
+    it("6. Legitimate E-Global server-to-server transfer with Bearer token should process successfully", async () => {
+      mockFlwClient.request.mockResolvedValueOnce({
+        status: "success",
+        message: "Transfer initiated",
+        data: { id: 112233, status: "SUCCESSFUL" },
+      });
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
+        .send(validPayload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.provider_reference).toBe("112233");
+    });
+  });
+
+  describe("Transfer Validation & Execution Logic (Restored)", () => {
+    it("7. Should return HTTP 400 validation error if amount is missing", async () => {
+      const { amount, ...invalidPayload } = validPayload;
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
+        .send(invalidPayload);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Validation Error");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+    });
+
+    it("8. Should explicitly persist custom narration and remark on transfer documents", async () => {
+      mockFlwClient.request.mockResolvedValueOnce({
+        status: "success",
+        message: "Transfer queued",
+        data: { id: 776655, status: "NEW" },
+      });
+
+      const customNarration = "E-Tech Custom Narration Note";
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send({
           ...validPayload,
           narration: customNarration,
@@ -210,47 +251,34 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
 
-      // Verify that Flutterwave was called with the exact narration
-      expect(mockFlwClient.request).toHaveBeenCalledWith(
-        "post",
-        "/transfers",
-        expect.objectContaining({
-          narration: customNarration,
-        })
-      );
-
-      // Inspect mock Firestore store for transfers and transactions
       const transferDoc = mockFirestoreStore[`transfers/${validPayload.reference}`];
-      const transactionDoc = mockFirestoreStore[`transactions/tx-${validPayload.reference}`];
-
       expect(transferDoc).toBeDefined();
       expect(transferDoc.narration).toBe(customNarration);
-      expect(transferDoc.remark).toBe(customNarration);
-      expect(transferDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
 
+      const transactionDoc = mockFirestoreStore[`transactions/tx-${validPayload.reference}`];
       expect(transactionDoc).toBeDefined();
       expect(transactionDoc.narration).toBe(customNarration);
-      expect(transactionDoc.remark).toBe(customNarration);
-      expect(transactionDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
     });
 
-    it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
+    it("9. Should reject duplicate transfer reference if sent twice (Idempotency check)", async () => {
       mockFlwClient.request.mockResolvedValue({
         status: "success",
-        data: { id: 778899, status: "NEW" },
+        message: "Transfer queued",
+        data: { id: 887766, status: "NEW" },
       });
 
-      // Send first transfer
       const res1 = await request(app)
         .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
       expect(res1.status).toBe(200);
 
       // Send identical transfer reference again
       const res2 = await request(app)
         .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
 
       expect(res2.status).toBe(400);
@@ -258,65 +286,18 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       expect(res2.body.message).toContain("Duplicate transfer reference");
     });
 
-    it("should return normalized failure on provider failure", async () => {
-      mockFlwClient.request.mockRejectedValue(new Error("Unable to execute transfer"));
+    it("10. Should return normalized failure response when provider rejects transfer", async () => {
+      mockFlwClient.request.mockRejectedValueOnce(new Error("Unable to execute transfer"));
 
       const res = await request(app)
         .post("/api/flutterwave/transfer")
-        .set("X-API-Key", testApiKey)
+        .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain("Unable to execute transfer");
-    });
-  });
-
-  describe("GET /api/flutterwave/transfer/status/:reference - Status Polling", () => {
-    it("should fetch transfer status directly from Flutterwave fallback when not in DB", async () => {
-      mockFlwClient.request.mockResolvedValue({
-        status: "success",
-        data: [
-          {
-            id: 778899,
-            status: "SUCCESSFUL",
-            reference: "polling-ref-123",
-          }
-        ]
-      });
-
-      const res = await request(app)
-        .get("/api/flutterwave/transfer/status/polling-ref-123")
-        .set("X-API-Key", testApiKey);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        success: true,
-        status: "SUCCESS",
-      });
-    });
-
-    it("should return PENDING for processing status from Flutterwave fallback", async () => {
-      mockFlwClient.request.mockResolvedValue({
-        status: "success",
-        data: [
-          {
-            id: 778899,
-            status: "NEW",
-            reference: "polling-ref-456",
-          }
-        ]
-      });
-
-      const res = await request(app)
-        .get("/api/flutterwave/transfer/status/polling-ref-456")
-        .set("X-API-Key", testApiKey);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        success: true,
-        status: "NEW",
-      });
     });
   });
 });

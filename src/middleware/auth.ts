@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { getAuth } from "firebase-admin/auth";
 import { env } from "../config/env";
 import logger from "../config/logger";
 import { firebase, adminDb } from "../config/firebase";
@@ -38,13 +39,33 @@ export async function gatewayAuthMiddleware(
     }
   }
 
-  // 2. JWT Authentication path (Can be enabled/toggled)
+  const rawUrl = req.originalUrl || req.path || req.url || "";
+  const urlPathname = rawUrl.split("?")[0].split("#")[0].trim().toLowerCase();
+  const isTransferRoute = urlPathname.includes("/transfer") || urlPathname.includes("/bulk-transfer");
+
+  // Explicit allowlist of legitimate auth/recovery route pathnames (exact match required)
+  let isAuthExempt = false;
+  if (!isTransferRoute) {
+    const authExemptExactPaths = new Set([
+      "/api/auth/send-otp",
+      "/api/auth/verify-otp",
+      "/api/auth/pin-reset-otp",
+      "/api/auth/pin-verify-otp",
+      "/send-otp",
+      "/verify-otp",
+      "/pin-reset-otp",
+      "/pin-verify-otp",
+    ]);
+
+    isAuthExempt = authExemptExactPaths.has(urlPathname);
+  }
+
+  // 2. JWT / Firebase Authentication path
   if (providedToken) {
     if (firebase.app) {
       try {
-        const { getAuth } = require("firebase-admin/auth");
         const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
-        const uid = decoded.uid;
+        const uid = decoded?.uid;
 
         if (!uid) {
           logger.warn(`[Auth] Firebase token missing UID claim | reqId=${reqId}`);
@@ -56,11 +77,7 @@ export async function gatewayAuthMiddleware(
           return;
         }
 
-        req.user = decoded;
-
-        // Check if route is an auth/recovery endpoint (PIN reset, OTP send/verify, session setup)
-        const path = req.originalUrl || req.path || req.url || "";
-        const isAuthExempt = path.includes("/auth/") || path.includes("pin-reset-otp") || path.includes("pin-verify-otp") || path.includes("send-otp") || path.includes("verify-otp");
+        req.user = { ...decoded, firebaseAuth: true };
 
         if (!isAuthExempt) {
           // Server-authoritative session enforcement
@@ -101,12 +118,12 @@ export async function gatewayAuthMiddleware(
 
             const activeSessionId = userDoc.data()?.activeSessionId;
 
-            if (activeSessionId && providedSessionId !== activeSessionId) {
-              logger.warn(`[Auth] REVOKED_SESSION: Session mismatch for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
+            if (!activeSessionId || providedSessionId !== activeSessionId) {
+              logger.warn(`[Auth] REVOKED_SESSION: Session mismatch or missing activeSessionId for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
               res.status(401).json({
                 success: false,
                 code: "REVOKED_SESSION",
-                message: "Your account was signed in on another device. You have been logged out on this device.",
+                message: "Your account was signed in on another device or has no active session. You have been logged out on this device.",
               });
               return;
             }
@@ -134,10 +151,20 @@ export async function gatewayAuthMiddleware(
       }
     }
 
+    if (isTransferRoute) {
+      logger.warn(`[Auth] Transfer rejected: Firebase authentication service unavailable | reqId=${reqId}`);
+      res.status(401).json({
+        success: false,
+        code: "REVOKED_SESSION",
+        message: "Unauthorized: Firebase authentication service is unavailable for transfers.",
+      });
+      return;
+    }
+
     try {
       const decoded = jwt.verify(providedToken, env.JWT_SECRET);
       req.user = decoded;
-      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
+      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).uid || (decoded as any).sub || "unknown"} | reqId=${reqId}`);
       return next();
     } catch (error: any) {
       logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
@@ -178,6 +205,8 @@ export async function gatewayAuthMiddleware(
     });
     return;
   }
+
+
 
   logger.debug(`[Auth] API Key authenticated successfully | reqId=${reqId}`);
   next();
