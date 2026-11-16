@@ -507,4 +507,54 @@ export class EmailOtpService {
     return { success: true, message: "Email address verified successfully!" };
   }
 
+  /**
+   * Dispatches a caller-generated OTP for security flows whose session is managed
+   * by the application. Delivery credentials always come from backend VM env.
+   */
+  public static async sendRawOtp(to: string, otp: string, purpose: string): Promise<void> {
+    const apiUrl = env.EMAIL_API_URL;
+    const apiKey = env.EMAIL_API_KEY;
+    const instanceId = env.EMAIL_INSTANCE_ID || "";
+    const recipient = String(to || "").trim().toLowerCase();
+    const code = String(otp || "").trim();
+    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(recipient)) throw new Error("A valid email address is required.");
+    if (!/^[0-9]{6}$/.test(code)) throw new Error("A valid 6-digit OTP is required.");
+    if (!apiUrl || !apiKey) throw new Error("VM email service is not configured. Please contact support.");
+
+    const cleanKey = apiKey.trim().replace(/^[\"']|[\"']$/g, "");
+    const cleanInstance = instanceId.trim().replace(/^[\"']|[\"']$/g, "");
+    const endpoint = resolveWhatsApiEmailEndpoint(apiUrl);
+    const subject = purpose === "new_device_login"
+      ? "Security Alert: New Device Login Verification Code"
+      : "Your E-Global Pay 2FA Verification Code";
+    const title = purpose === "new_device_login" ? "New Device Login Verification" : "2FA Login Security Verification";
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">
+        <h2 style="color:#FC7A00">E-Global Pay Security</h2>
+        <h3>${title}</h3>
+        <p>Your 6-digit security verification code is:</p>
+        <div style="background:#FFF8EC;border:1px solid #FFE8CC;border-radius:12px;padding:16px;text-align:center;font-family:monospace;font-size:28px;font-weight:bold;letter-spacing:8px;color:#FC7A00">${code}</div>
+        <p>This code expires in 5 minutes. Never share it with anyone.</p>
+      </div>`;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-API-Key": cleanKey,
+      "Authorization": `Bearer ${cleanKey}`,
+    };
+    if (cleanInstance) {
+      headers["X-Instance-ID"] = cleanInstance;
+      headers["X-Project-ID"] = cleanInstance;
+    }
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ to: recipient, subject, html }),
+    });
+    if (!response.ok) {
+      const body = sanitizeLogMessage(await response.text().catch(() => ""), cleanKey);
+      logger.error(`[EmailOtpService] Security OTP delivery failed: HTTP ${response.status} ${body}`);
+      throw new Error("Failed to deliver verification email. Please try again later.");
+    }
+  }
 }
