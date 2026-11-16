@@ -437,7 +437,7 @@ export class WhatsAppOtpService {
    */
   public static async sendRawOtp(phoneNumber: string, otp: string, purpose: string): Promise<void> {
     const code = String(otp || "").trim();
-    const cleanPhone = String(phoneNumber || "").replace(/\\D/g, "");
+    const cleanPhone = String(phoneNumber || "").replace(/\D/g, "");
     if (!/^[0-9]{6}$/.test(code)) throw new Error("A valid 6-digit OTP is required.");
     if (cleanPhone.length < 8) throw new Error("A valid WhatsApp destination is required.");
     const apiUrl = env.WHATSAPP_API_URL;
