@@ -11,6 +11,38 @@ const router = Router();
  * Endpoint to generate and send a WhatsApp OTP
  * Protected via S2S gateway authentication
  */
+
+/**
+ * Delivers an application-generated 2FA/new-device OTP through backend VM env.
+ * This endpoint does not read CPANEL provider settings.
+ */
+router.post("/dispatch-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { channel, destination, otp, purpose } = req.body || {};
+    if (!["email", "whatsapp"].includes(channel) || !destination || !otp || !purpose) {
+      res.status(400).json({ success: false, message: "channel, destination, otp and purpose are required." });
+      return;
+    }
+    if (!/^[0-9]{6}$/.test(String(otp))) {
+      res.status(400).json({ success: false, message: "A valid 6-digit OTP is required." });
+      return;
+    }
+    if (!["login_2fa", "new_device_login"].includes(purpose)) {
+      res.status(400).json({ success: false, message: "Unsupported OTP purpose." });
+      return;
+    }
+    if (channel === "email") {
+      await EmailOtpService.sendRawOtp(String(destination), String(otp), purpose);
+    } else {
+      await WhatsAppOtpService.sendRawOtp(String(destination), String(otp), purpose);
+    }
+    res.status(200).json({ success: true, channel, message: `Verification code delivered via ${channel}.` });
+  } catch (error: any) {
+    logger.error(`[AuthRoutes] dispatch-otp failure: ${error.message}`);
+    res.status(502).json({ success: false, message: error.message || "OTP delivery failed." });
+  }
+});
+
 router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const { phoneNumber, type, channel, email } = req.body;
