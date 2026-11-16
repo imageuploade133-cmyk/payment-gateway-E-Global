@@ -29,4 +29,25 @@ export declare class EmailOtpService {
         success: boolean;
         message: string;
     }>;
+    /**
+     * Sends a signup email OTP using ONLY the backend VM environment credentials.
+     * The CPANEL email_connect document is intentionally never consulted here.
+     */
+    static sendSignupOtp(email: string): Promise<{
+        message: string;
+        devOtp?: string;
+    }>;
+    /**
+     * Verifies a signup email OTP on the backend VM. Supports legacy HMAC sessions
+     * only for a short migration window; new sessions use bcrypt.
+     */
+    static verifySignupOtp(email: string, otpCode: string): Promise<{
+        success: boolean;
+        message: string;
+    }>;
+    /**
+     * Dispatches a caller-generated OTP for security flows whose session is managed
+     * by the application. Delivery credentials always come from backend VM env.
+     */
+    static sendRawOtp(to: string, otp: string, purpose: string): Promise<void>;
 }

@@ -1,7 +1,13 @@
 import dotenv from "dotenv";
 import logger from "./logger";
 
-dotenv.config();
+const dotenvResult = dotenv.config();
+
+// Always take EMAIL_API_URL from the VM's .env file when it is defined.
+// This prevents stale PM2 environment values from overriding the configured URL.
+if (dotenvResult.parsed?.EMAIL_API_URL) {
+  process.env.EMAIL_API_URL = dotenvResult.parsed.EMAIL_API_URL;
+}
 
 export interface EnvConfig {
   PORT: number;

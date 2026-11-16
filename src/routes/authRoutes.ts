@@ -10,6 +10,66 @@ const router = Router();
 // Router-wide gateway auth & session validation middleware
 router.use(gatewayAuthMiddleware);
 
+// Centralized delivery for the OTP already generated and stored by the Vercel app.
+// This endpoint must deliver the supplied code; it must never generate a second OTP.
+router.post("/dispatch-otp", async (req: Request, res: Response) => {
+  try {
+    const { channel, destination, otp, purpose } = req.body || {};
+
+    if (purpose !== "new_device_login") {
+      return res.status(400).json({
+        success: false,
+        message: "Unsupported OTP purpose.",
+      });
+    }
+
+    if (channel !== "email" && channel !== "whatsapp") {
+      return res.status(400).json({
+        success: false,
+        message: "Unsupported OTP delivery channel.",
+      });
+    }
+
+    const code = String(otp || "").trim();
+    const target = typeof destination === "string" ? destination.trim() : "";
+
+    if (!/^[0-9]{6}$/.test(code)) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid 6-digit OTP is required.",
+      });
+    }
+
+    if (!target || target.length > 254) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid destination is required.",
+      });
+    }
+
+    if (channel === "email") {
+      await EmailOtpService.sendRawOtp(target, code, purpose);
+    } else {
+      await WhatsAppOtpService.sendRawOtp(target, code, purpose);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP dispatched successfully.",
+    });
+  } catch (error: any) {
+    logger.error(
+      `[AuthRoutes] dispatch-otp failure: ${error?.message || "Unknown delivery error"}`
+    );
+
+    return res.status(502).json({
+      success: false,
+      message: "Failed to deliver verification code.",
+    });
+  }
+});
+
+
 /**
  * Endpoint to generate and send a WhatsApp OTP
  * Protected via S2S gateway authentication

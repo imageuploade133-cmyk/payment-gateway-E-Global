@@ -6,7 +6,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.env = void 0;
 const dotenv_1 = __importDefault(require("dotenv"));
 const logger_1 = __importDefault(require("./logger"));
-dotenv_1.default.config();
+const dotenvResult = dotenv_1.default.config();
+// Always take EMAIL_API_URL from the VM's .env file when it is defined.
+// This prevents stale PM2 environment values from overriding the configured URL.
+if (dotenvResult.parsed?.EMAIL_API_URL) {
+    process.env.EMAIL_API_URL = dotenvResult.parsed.EMAIL_API_URL;
+}
 function validateEnv() {
     const PORT = Number(process.env.PORT) || 3055;
     const NODE_ENV = process.env.NODE_ENV || "development";
