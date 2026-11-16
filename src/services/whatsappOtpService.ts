@@ -431,4 +431,43 @@ export class WhatsAppOtpService {
       message: "WhatsApp OTP verified successfully.",
     };
   }
+  /**
+   * Sends an already-generated security OTP using only backend VM WhatsApp env.
+   * This is used by application-managed 2FA and new-device challenges.
+   */
+  public static async sendRawOtp(phoneNumber: string, otp: string, purpose: string): Promise<void> {
+    const code = String(otp || "").trim();
+    const cleanPhone = String(phoneNumber || "").replace(/\\D/g, "");
+    if (!/^[0-9]{6}$/.test(code)) throw new Error("A valid 6-digit OTP is required.");
+    if (cleanPhone.length < 8) throw new Error("A valid WhatsApp destination is required.");
+    const apiUrl = env.WHATSAPP_API_URL;
+    const apiKey = env.WHATSAPP_API_KEY;
+    const instanceId = env.WHATSAPP_INSTANCE_ID;
+    if (!apiUrl || !apiKey || !instanceId) {
+      throw new Error("VM WhatsApp service is not configured. Please contact support.");
+    }
+
+    let targetUrl = apiUrl.trim().replace(/\\/+$/, "");
+    targetUrl = targetUrl.replace("whatsapp-5fda.onrender.com", "whatsapp-b5os.onrender.com");
+    if (!targetUrl.includes("/api/send/text") && !targetUrl.includes("/send/text")) {
+      targetUrl = targetUrl.endsWith("/api") ? `${targetUrl}/send/text` : `${targetUrl}/api/send/text`;
+    }
+
+    const label = purpose === "new_device_login" ? "New Device Security Login" : "2FA Login Authentication";
+    const message = `Your E-Global Pay ${label} Verification Code is *${code}*. Valid for 5 minutes. Do not share with anyone.`;
+    const response = await fetch(targetUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": apiKey.trim(),
+        "X-Instance-ID": instanceId.trim(),
+      },
+      body: JSON.stringify({ number: cleanPhone, message }),
+    });
+    if (!response.ok) {
+      const textResponse = await response.text().catch(() => "");
+      logger.error(`[WhatsAppOtpService] Security OTP delivery failed: HTTP ${response.status} ${textResponse.slice(0, 300)}`);
+      throw new Error("Failed to deliver WhatsApp verification code. Please try again later.");
+    }
+  }
 }
