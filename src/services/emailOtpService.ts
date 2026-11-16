@@ -332,4 +332,179 @@ export class EmailOtpService {
       message: "Email OTP verified successfully.",
     };
   }
+
+  /**
+   * Sends a signup email OTP using ONLY the backend VM environment credentials.
+   * The CPANEL email_connect document is intentionally never consulted here.
+   */
+  public static async sendSignupOtp(email: string): Promise<{ message: string; devOtp?: string }> {
+    const isProd = env.NODE_ENV === "production";
+    const emailApiUrl = env.EMAIL_API_URL;
+    const emailApiKey = env.EMAIL_API_KEY;
+    const emailInstanceId = env.EMAIL_INSTANCE_ID || "";
+
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizedEmail)) {
+      throw new Error("Please enter a valid email address.");
+    }
+    if (!emailApiUrl || !emailApiKey) {
+      logger.error("[EmailOtpService] VM email configuration is incomplete.");
+      throw new Error("VM email service is not configured. Please contact support.");
+    }
+    if (!adminDb) throw new Error("Firestore Admin Database not initialized.");
+
+    const now = new Date();
+    const nowMs = now.getTime();
+    const cooldownRef = adminDb.collection("otp_cooldowns").doc(`signup_email_${normalizedEmail}`);
+    const cooldownSnap = await cooldownRef.get();
+    if (cooldownSnap.exists) {
+      const lastSentAt = Number(cooldownSnap.data()?.lastSentAt || 0);
+      if (nowMs - lastSentAt < 60000) {
+        const remaining = Math.ceil((60000 - (nowMs - lastSentAt)) / 1000);
+        throw new Error(`Please wait ${remaining} seconds before requesting another email verification code.`);
+      }
+    }
+
+    const rawOtp = this.generateOtp();
+    const hashedOtp = await bcrypt.hash(rawOtp, 10);
+    const expiresAtMs = nowMs + 5 * 60 * 1000;
+    const otpRef = adminDb.collection("signup_email_otps").doc(normalizedEmail);
+    await otpRef.set({
+      email: normalizedEmail,
+      otpHash: hashedOtp,
+      hashAlgorithm: "bcrypt",
+      attempts: 0,
+      consumed: false,
+      verified: false,
+      createdAtMs: nowMs,
+      expiresAtMs,
+      createdAt: now.toISOString(),
+    });
+
+    const endpoint = resolveWhatsApiEmailEndpoint(emailApiUrl);
+    const cleanKey = emailApiKey.trim().replace(/^[\"']|[\"']$/g, "");
+    const cleanInstance = emailInstanceId.trim().replace(/^[\"']|[\"']$/g, "");
+    const safeEmail = escapeHtml(normalizedEmail);
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">
+        <h2 style="color:#FC7A00">E-Global Pay Account Verification</h2>
+        <p>Hello,</p><p>Use this 6-digit code to verify your email address:</p>
+        <div style="padding:16px;background:#f4f4f4;text-align:center;font-size:28px;font-weight:bold;letter-spacing:8px">${rawOtp}</div>
+        <p>This code expires in 5 minutes. Do not share it with anyone.</p>
+        <p style="color:#777;font-size:12px">If you did not request this code, you can ignore this email.</p>
+      </div>`;
+
+    let delivered = false;
+    let lastError = "";
+    for (let attempt = 1; attempt <= 2 && !delivered; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "X-API-Key": cleanKey,
+          "Authorization": `Bearer ${cleanKey}`,
+        };
+        if (cleanInstance) {
+          headers["X-Instance-ID"] = cleanInstance;
+          headers["X-Project-ID"] = cleanInstance;
+        }
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            to: normalizedEmail,
+            subject: "Welcome to E-Global Pay - Email Verification Code",
+            html,
+          }),
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          delivered = true;
+        } else {
+          const responseText = await response.text().catch(() => "");
+          lastError = `Email provider returned HTTP ${response.status}: ${sanitizeLogMessage(responseText, cleanKey)}`;
+          logger.error(`[EmailOtpService] Signup email dispatch failed: ${lastError}`);
+          if ([400, 401, 403, 429].includes(response.status)) break;
+        }
+      } catch (error: any) {
+        lastError = error?.name === "AbortError" ? "Email provider request timed out." : sanitizeLogMessage(error?.message || "Network error", cleanKey);
+        logger.error(`[EmailOtpService] Signup email dispatch exception: ${lastError}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (!delivered && attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    if (!delivered) {
+      await otpRef.delete().catch(() => undefined);
+      throw new Error("Failed to deliver email verification code. Please try again later.");
+    }
+
+    await cooldownRef.set({ email: normalizedEmail, lastSentAt: nowMs, updatedAt: now.toISOString() });
+    await adminDb.collection("otp_audits").add({
+      email: normalizedEmail, channel: "email", type: "signup",
+      action: "GENERATE", status: "SUCCESS", timestamp: now.toISOString(),
+    });
+
+    return {
+      message: "Verification code sent to your email address successfully!",
+      ...(!isProd ? { devOtp: rawOtp } : {}),
+    };
+  }
+
+  /**
+   * Verifies a signup email OTP on the backend VM. Supports legacy HMAC sessions
+   * only for a short migration window; new sessions use bcrypt.
+   */
+  public static async verifySignupOtp(email: string, otpCode: string): Promise<{ success: boolean; message: string }> {
+    if (!adminDb) throw new Error("Firestore Admin Database not initialized.");
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const submittedOtp = String(otpCode || "").trim();
+    if (!/^[0-9]{6}$/.test(submittedOtp)) throw new Error("A valid 6-digit OTP code is required.");
+
+    const otpRef = adminDb.collection("signup_email_otps").doc(normalizedEmail);
+    const snap = await otpRef.get();
+    if (!snap.exists) throw new Error("Verification code not found or expired. Please request a new code.");
+    const data = snap.data() || {};
+    const now = Date.now();
+
+    if (data.consumed === true) throw new Error("This verification code has already been used. Please request a new code.");
+    if (!data.expiresAtMs || now > Number(data.expiresAtMs)) {
+      await otpRef.delete().catch(() => undefined);
+      throw new Error("Verification code has expired. Please request a new code.");
+    }
+    const attempts = Number(data.attempts || 0);
+    if (attempts >= 3) throw new Error("Too many failed attempts. Please request a new verification code.");
+
+    let valid = false;
+    if (data.hashAlgorithm === "bcrypt" || String(data.otpHash || "").startsWith("$2")) {
+      valid = await bcrypt.compare(submittedOtp, String(data.otpHash || ""));
+    } else if (data.otpHash) {
+      // Backward compatibility for sessions created before the VM migration.
+      const secret = process.env.CPANEL_SESSION_SECRET || process.env.JWT_SECRET || "signup_otp_secret_key";
+      const legacyHash = crypto.createHmac("sha256", secret).update(submittedOtp).digest("hex");
+      valid = data.otpHash === legacyHash;
+    } else {
+      valid = data.otpCode === submittedOtp;
+    }
+
+    if (!valid) {
+      const nextAttempts = attempts + 1;
+      await otpRef.update({ attempts: nextAttempts });
+      await adminDb.collection("otp_audits").add({
+        email: normalizedEmail, channel: "email", type: "signup",
+        action: "VERIFY_FAILED", attemptCount: nextAttempts, timestamp: new Date().toISOString(),
+      });
+      throw new Error(`Incorrect verification code. You have ${Math.max(0, 3 - nextAttempts)} attempt(s) remaining.`);
+    }
+
+    await otpRef.update({ consumed: true, verified: true, consumedAt: new Date().toISOString() });
+    await adminDb.collection("otp_audits").add({
+      email: normalizedEmail, channel: "email", type: "signup",
+      action: "VERIFY_SUCCESS", timestamp: new Date().toISOString(),
+    });
+    return { success: true, message: "Email address verified successfully!" };
+  }
+
 }
