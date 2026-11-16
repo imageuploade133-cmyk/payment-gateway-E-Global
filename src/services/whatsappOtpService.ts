@@ -174,38 +174,9 @@ export class WhatsAppOtpService {
     let whatsappAdminUsername = env.WHATSAPP_ADMIN_USERNAME;
     let whatsappAdminPassword = env.WHATSAPP_ADMIN_PASSWORD;
 
-    // Dynamically check Firestore config if available
-    try {
-      if (adminDb) {
-        const waDoc = await adminDb.collection("config").doc("whatsapp_api").get();
-        if (waDoc.exists) {
-          const waData = waDoc.data();
-          if (waData?.whatsappApiUrl) whatsappApiUrl = waData.whatsappApiUrl;
-          if (waData?.whatsappApiKey) whatsappApiKey = waData.whatsappApiKey;
-          if (waData?.whatsappInstanceId) whatsappInstanceId = waData.whatsappInstanceId;
-          if (waData?.whatsappAdminUsername) whatsappAdminUsername = waData.whatsappAdminUsername;
-          if (waData?.whatsappAdminPassword) whatsappAdminPassword = waData.whatsappAdminPassword;
-        } else {
-          const emailDoc = await adminDb.collection("config").doc("email_connect").get();
-          if (emailDoc.exists) {
-            const emailData = emailDoc.data();
-            if (emailData?.whatsappApiUrl || emailData?.emailApiUrl) {
-              whatsappApiUrl = emailData.whatsappApiUrl || emailData.emailApiUrl;
-            }
-            if (emailData?.whatsappApiKey || emailData?.emailApiKey) {
-              whatsappApiKey = emailData.whatsappApiKey || emailData.emailApiKey;
-            }
-            if (emailData?.whatsappInstanceId || emailData?.emailInstanceId) {
-              whatsappInstanceId = emailData.whatsappInstanceId || emailData.emailInstanceId;
-            }
-            if (emailData?.emailAdminUsername) whatsappAdminUsername = emailData.emailAdminUsername;
-            if (emailData?.emailAdminPassword) whatsappAdminPassword = emailData.emailAdminPassword;
-          }
-        }
-      }
-    } catch (dbErr: any) {
-      logger.warn(`[WhatsAppOtpService] Dynamic config fetch warning: ${dbErr.message}`);
-    }
+    // OTP delivery credentials are intentionally read only from backend VM env.
+    // CPANEL provider settings are reserved for admin connection tests and must not
+    // override production OTP delivery.
 
     // Validate configuration
     if (!whatsappApiUrl || !whatsappInstanceId) {
