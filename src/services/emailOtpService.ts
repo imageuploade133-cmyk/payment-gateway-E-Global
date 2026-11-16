@@ -344,7 +344,7 @@ export class EmailOtpService {
     const emailInstanceId = env.EMAIL_INSTANCE_ID || "";
 
     const normalizedEmail = String(email || "").trim().toLowerCase();
-    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(normalizedEmail)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       throw new Error("Please enter a valid email address.");
     }
     if (!emailApiUrl || !emailApiKey) {
@@ -384,7 +384,6 @@ export class EmailOtpService {
     const endpoint = resolveWhatsApiEmailEndpoint(emailApiUrl);
     const cleanKey = emailApiKey.trim().replace(/^[\"']|[\"']$/g, "");
     const cleanInstance = emailInstanceId.trim().replace(/^[\"']|[\"']$/g, "");
-    const safeEmail = escapeHtml(normalizedEmail);
     const html = `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">
         <h2 style="color:#FC7A00">E-Global Pay Account Verification</h2>
@@ -517,7 +516,7 @@ export class EmailOtpService {
     const instanceId = env.EMAIL_INSTANCE_ID || "";
     const recipient = String(to || "").trim().toLowerCase();
     const code = String(otp || "").trim();
-    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(recipient)) throw new Error("A valid email address is required.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) throw new Error("A valid email address is required.");
     if (!/^[0-9]{6}$/.test(code)) throw new Error("A valid 6-digit OTP is required.");
     if (!apiUrl || !apiKey) throw new Error("VM email service is not configured. Please contact support.");
 
