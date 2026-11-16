@@ -447,7 +447,7 @@ export class WhatsAppOtpService {
       throw new Error("VM WhatsApp service is not configured. Please contact support.");
     }
 
-    let targetUrl = apiUrl.trim().replace(/\\/+$/, "");
+    let targetUrl = apiUrl.trim().replace(/\/+$, "");
     targetUrl = targetUrl.replace("whatsapp-5fda.onrender.com", "whatsapp-b5os.onrender.com");
     if (!targetUrl.includes("/api/send/text") && !targetUrl.includes("/send/text")) {
       targetUrl = targetUrl.endsWith("/api") ? `${targetUrl}/send/text` : `${targetUrl}/api/send/text`;
